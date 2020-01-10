@@ -11,12 +11,10 @@ export class TodosAccess {
   constructor(
     private readonly docClient: DocumentClient = createDynamoDBClient(),
     private readonly todosTable = process.env.TODOS_TABLE,
-    private readonly indexName = process.env.INDEX_NAME) {
+    private readonly bucketName = process.env.IMAGES_S3_BUCKET) {
   }
 
   async getTodos(userId: string): Promise<TodoItem[]> {
-    console.log(this.todosTable)
-
     const result = await this.docClient.query({
       TableName: this.todosTable,
       KeyConditionExpression: 'userId = :userId',
@@ -25,10 +23,22 @@ export class TodosAccess {
       }
     }).promise()
 
-    console.log('Results: ', result)
-
     const items = result.Items
     return items as TodoItem[]
+  }
+
+  async getTodo(todoId: string, userId: string): Promise<TodoItem> {
+    const result = await this.docClient.query({
+      TableName: this.todosTable,
+      KeyConditionExpression: 'userId = :userId',
+      FilterExpression: 'todoId = :todoId',
+      ExpressionAttributeValues: {
+        ':userId': userId,
+        ':todoId': todoId
+      },
+    }).promise()
+
+    return result.Items[0] as TodoItem
   }
 
   async createTodos(newTodo: TodoItem): Promise<TodoItem> {
@@ -41,48 +51,28 @@ export class TodosAccess {
   }
 
   async deleteTodo(todoId: string, userId: string) {
-    const val = await this.docClient.query({
-      TableName: this.todosTable,
-      KeyConditionExpression: 'userId = :userId',
-      FilterExpression: 'todoId = :todoId',
-      ExpressionAttributeValues: {
-        ':userId': userId,
-        ':todoId': todoId
-      },
-    }).promise()
-
-    const item = val.Items[0] as TodoItem
-    console.log('item', item)
+    const todo = await this.getTodo(todoId, userId)
 
     await this.docClient.delete({
       TableName: this.todosTable,
       Key: {
         userId: userId,
-        createdAt: item.createdAt
+        createdAt: todo.createdAt
       }
-    }).promise
+    }).promise()
 
     return { deletedTodoId: todoId };
   }
 
   async updateTodo(userId: string, todoId: string, updatedRequest: UpdateTodoRequest): Promise<boolean> {
-    const keys = await this.docClient
-      .query({
-        TableName: this.todosTable,
-        IndexName: this.indexName,
-        KeyConditionExpression: 'userId = :userId and todoId = :todoId',
-        ExpressionAttributeValues: {
-          ':userId': userId,
-          ':todoId': todoId
-        }
-      }).promise()
+    const todo = await this.getTodo(todoId, userId)
 
     await this.docClient.update({
       TableName: this.todosTable,
       Key: {
         userId: userId,
-        createdAt: keys.Items[0].createdAt
-      },      
+        createdAt: todo.createdAt
+      },
       UpdateExpression: 'set done = :done, dueDate = :dueDate, #nm = :title',
       ExpressionAttributeNames: {
         "#nm": "name"
@@ -96,11 +86,27 @@ export class TodosAccess {
 
     return updatedRequest.done;
   }
+
+  async AddAttachment(userId: string, todoId: string) {
+    const todo = await this.getTodo(todoId, userId)
+    const link = `https://${this.bucketName}.s3.amazonaws.com/${todoId}`
+    
+    await this.docClient.update({
+      TableName: this.todosTable,
+      Key: {
+        userId: userId,
+        createdAt: todo.createdAt
+      },
+      UpdateExpression: 'set attachmentUrl = :attachmentUrl',
+      ExpressionAttributeValues: {
+        ':attachmentUrl': link
+      }
+    }).promise()
+  }
 }
 
 function createDynamoDBClient() {
   if (process.env.IS_OFFLINE) {
-    console.log('Creating a local DynamoDB instance')
     return new XAWS.DynamoDB.DocumentClient({
       region: 'localhost',
       endpoint: 'http://localhost:8000'
